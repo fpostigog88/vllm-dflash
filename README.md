@@ -62,9 +62,9 @@ Single-Stream tok/s (DGX Spark GB10, Qwen3.5-27B NVFP4)
 |---|---|
 | **TTFT** | 98-138 ms |
 | **ITL (p50/p99)** | 81/88 ms |
-| **Max Context** | 128K tokens (model supports 256K) |
+| **Max Context** | 64K default (model supports up to 256K) |
 | **Model Size** | ~20 GB (NVFP4) / ~52 GB (BF16) |
-| **Optimal Config** | 15 spec tokens, 8 seqs, 128K context |
+| **Default Config** | 15 spec tokens, 4 seqs, 64K context |
 
 ---
 
@@ -124,11 +124,11 @@ MODEL_HOST_PATH=~/models/DFlash-Qwen3.5-27B-Uncensored-NVFP4
 DFLASH_DRAFTER=z-lab/Qwen3.5-27B-DFlash
 DFLASH_NUM_SPEC_TOKENS=15
 
-# DGX Spark optimal settings (128K context, 8 concurrent sequences)
-MAX_MODEL_LEN=131072
-MAX_NUM_SEQS=8
+# DGX Spark optimal settings (64K context, 4 concurrent sequences)
+MAX_MODEL_LEN=65536
+MAX_NUM_SEQS=4
 GPU_MEMORY_UTILIZATION=0.85
-MAX_NUM_BATCHED_TOKENS=131072
+MAX_NUM_BATCHED_TOKENS=65536
 EOF
 
 # Generate a real API key and inject it
@@ -244,10 +244,10 @@ DFLASH_DRAFTER=z-lab/Qwen3.5-27B-DFlash
 DFLASH_NUM_SPEC_TOKENS=15
 
 # DGX Spark BF16 settings (needs more memory than NVFP4)
-MAX_MODEL_LEN=131072
-MAX_NUM_SEQS=4
+MAX_MODEL_LEN=65536
+MAX_NUM_SEQS=2
 GPU_MEMORY_UTILIZATION=0.90
-MAX_NUM_BATCHED_TOKENS=131072
+MAX_NUM_BATCHED_TOKENS=65536
 EOF
 
 sed -i "s|\$(openssl rand -hex 32)|$(openssl rand -hex 32)|" .env.dflash
@@ -325,10 +325,10 @@ The container's entrypoint automatically:
 | `DFLASH_DRAFTER` | *(empty = off)* | HF repo ID (e.g. `z-lab/Qwen3.5-27B-DFlash`) or local path. Set to `off` or leave empty to disable speculative decoding |
 | `DFLASH_NUM_SPEC_TOKENS` | `15` | Speculative tokens per draft step. `15` for best single-stream, `5` for high concurrency |
 | `SERVED_MODEL_NAME` | *(from MODEL_PATH)* | Model name exposed via the API |
-| `MAX_MODEL_LEN` | `131072` | Maximum sequence length (model supports up to 256K) |
-| `MAX_NUM_SEQS` | `8` | Maximum concurrent sequences |
+| `MAX_MODEL_LEN` | `65536` | Maximum sequence length (model supports up to 256K — see [tuning guide](#dgx-spark-tuning-guide)) |
+| `MAX_NUM_SEQS` | `4` | Maximum concurrent sequences |
 | `GPU_MEMORY_UTILIZATION` | `0.85` | GPU memory fraction (increase to 0.90 for BF16) |
-| `MAX_NUM_BATCHED_TOKENS` | `131072` | Maximum tokens batched per iteration |
+| `MAX_NUM_BATCHED_TOKENS` | `65536` | Maximum tokens batched per iteration |
 | `KV_CACHE_DTYPE` | `auto` (DFlash) / `fp8_e4m3` (no DFlash) | KV cache precision. DFlash requires `auto` (BF16) due to non-causal attention |
 | `ATTENTION_BACKEND` | `flash_attn` | Attention implementation |
 | `QUANTIZATION` | `auto` | `auto` detects from model config. `modelopt` for NVFP4, `none` for BF16 |
@@ -402,21 +402,21 @@ docker run -d --runtime nvidia --network host --ipc host \
 
 ### DGX Spark Tuning Guide
 
-The container defaults are tuned for the DGX Spark GB10 (128 GB unified memory, 273 GB/s bandwidth) with **128K context and 8 concurrent sequences**. KV cache is allocated dynamically via PagedAttention — sequences only consume memory proportional to their actual token count, not the maximum context length.
+The container defaults are tuned for the DGX Spark GB10 (128 GB unified memory, 273 GB/s bandwidth) with **64K context and 4 concurrent sequences**. Note that vLLM pre-allocates the full KV cache budget at startup, so `MAX_MODEL_LEN` directly impacts memory usage. Increase context or concurrency carefully — the model supports up to 256K, but higher values leave less headroom on the Spark's unified memory.
 
-| Workload | `NUM_SPEC_TOKENS` | `MAX_NUM_SEQS` | `GPU_MEMORY_UTILIZATION` | Expected tok/s |
-|---|:---:|:---:|:---:|:---:|
-| **Default (NVFP4)** | 15 | 8 | 0.85 | 33-39 single / 85-92 total |
-| **Interactive chat** (1-2 users) | 15 | 4 | 0.85 | 33-39 |
-| **Multi-user** (4-8 users) | 5 | 8 | 0.85 | 85-92 total |
-| **BF16 model** | 15 | 4 | 0.90 | 33 |
-| **No DFlash** (baseline) | — | 8 | 0.85 | 12 |
+| Workload | `MAX_MODEL_LEN` | `NUM_SPEC_TOKENS` | `MAX_NUM_SEQS` | `GPU_MEM_UTIL` | Expected tok/s |
+|---|:---:|:---:|:---:|:---:|:---:|
+| **Default (NVFP4)** | 65536 | 15 | 4 | 0.85 | 33-39 |
+| **High concurrency** | 32768 | 5 | 8 | 0.85 | 85-92 total |
+| **Long context** | 131072 | 15 | 2-3 | 0.85 | 33 |
+| **BF16 model** | 65536 | 15 | 2 | 0.90 | 33 |
+| **No DFlash** (baseline) | 65536 | — | 4 | 0.85 | 12 |
 
 ### Agentic Workloads
 
 When using this model as a backend for agentic frameworks (OpenClaw, LangGraph, CrewAI, AutoGen, etc.) where a primary agent spawns multiple sub-agents in parallel, keep the following in mind:
 
-- **Set `MAX_NUM_SEQS=8`** (default) — agents spawn concurrent tool calls and sub-agents that each hold an active sequence
+- **Increase `MAX_NUM_SEQS` to 6-8** — agents spawn concurrent tool calls and sub-agents that each hold an active sequence. Pair with a lower `MAX_MODEL_LEN` (32K) to fit more sequences in memory
 - **Limit sub-agent context size** — configure your gateway or agent framework to cap sub-agent context windows at 16K-32K tokens. This prevents a single runaway agent from consuming most of the KV cache and starving other sequences
 - **Aggressively reclaim finished sequences** — configure sub-agents to spin down promptly after completing their task rather than holding the connection open. This frees KV cache for other work
 - **Monitor KV cache usage** — check `GPU KV cache usage` in the server logs. If it consistently exceeds 80%, reduce `MAX_NUM_SEQS` or tighten sub-agent context limits
@@ -424,10 +424,11 @@ When using this model as a backend for agentic frameworks (OpenClaw, LangGraph, 
 
 Example gateway configuration (e.g. OpenClaw):
 ```
-Primary agent context:  128K (full model context)
-Sub-agent context:      32K  (prevents KV cache overflow)
-Max concurrent agents:  6-8  (matches MAX_NUM_SEQS)
-Agent idle timeout:     30s  (aggressive reclaim)
+MAX_MODEL_LEN:          32768  (lower context = more concurrent agents)
+MAX_NUM_SEQS:           8      (matches max concurrent agents)
+Sub-agent context:      16K    (prevents KV cache overflow)
+Primary agent context:  32K    (orchestrator gets full context)
+Agent idle timeout:     30s    (aggressive reclaim)
 ```
 
 ---
