@@ -1,0 +1,72 @@
+# ──────────────────────────────────────────────────────────────
+# DFlash Qwen3.5-27B Uncensored — NVFP4 + DFlash Speculative Decoding
+# Optimized for NVIDIA DGX Spark (GB10 Blackwell)
+#
+# Usage:
+#   docker compose --env-file .env.dflash up -d
+#
+# The container will automatically download the DFlash drafter
+# from HuggingFace on first run (~3.3 GB). Set HF_TOKEN if the
+# drafter repo requires authentication.
+#
+# To disable speculative decoding, set DFLASH_DRAFTER to "off":
+#   DFLASH_DRAFTER=off docker compose up -d
+# ──────────────────────────────────────────────────────────────
+
+services:
+  vllm-dflash:
+    image: ghcr.io/aeon-7/vllm-dflash:latest
+    container_name: vllm-dflash
+    environment:
+      # ── Model config ──
+      - MODEL_PATH=/models/DFlash-Qwen3.5-27B-Uncensored-NVFP4
+      - SERVED_MODEL_NAME=DFlash-Qwen3.5-27B-Uncensored
+      # ── DFlash speculative decoding ──
+      - DFLASH_DRAFTER=${DFLASH_DRAFTER:-z-lab/Qwen3.5-27B-DFlash}
+      - DFLASH_NUM_SPEC_TOKENS=${DFLASH_NUM_SPEC_TOKENS:-15}
+      # ── Resource tuning ──
+      - MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096}
+      - MAX_NUM_SEQS=${MAX_NUM_SEQS:-8}
+      - GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.80}
+      - MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-8192}
+      - KV_CACHE_DTYPE=${KV_CACHE_DTYPE:-}
+      # ── Runtime ──
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DISABLE_REQUIRE=1
+      - NVIDIA_FORWARD_COMPAT=1
+      - TORCH_MATMUL_PRECISION=high
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - VLLM_USAGE_SOURCE=production
+      - HF_TOKEN=${HF_TOKEN:-}
+      - VLLM_API_KEY=${VLLM_API_KEY:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      # Target model weights
+      - ${MODEL_HOST_PATH}:/models/DFlash-Qwen3.5-27B-Uncensored-NVFP4
+      # Drafter model cache (persists across restarts)
+      - dflash-drafter-cache:/models/drafter-cache
+      # Optional: mount local drafter to skip download
+      # - /path/to/drafter:/models/drafter-local
+    ipc: host
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 600s
+    restart: unless-stopped
+    network_mode: host
+
+volumes:
+  dflash-drafter-cache:
+    driver: local
