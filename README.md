@@ -531,3 +531,5 @@ If this release has been useful, tips are deeply appreciated — they go directl
 </table>
 
 > **Ethereum L2s (Base, Arbitrum, Optimism, Polygon, etc.) and EVM-compatible tokens** can be sent to the same Ethereum address.
+
+Built by [Felipe Postigo](https://www.felipepostigo.com)
